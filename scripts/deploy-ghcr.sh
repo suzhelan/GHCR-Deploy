@@ -5,11 +5,19 @@ set -euo pipefail
 : "${DEPLOY_PATH:?}"
 : "${COMPOSE_SERVICE:?}"
 : "${APP_IMAGE_REF:?}"
-: "${APP_VERSION:?}"
 : "${GHCR_USERNAME:?}"
 
-test -f "$DEPLOY_PATH/.env"
-test -f "$DEPLOY_PATH/docker-compose.yml"
+env_file="$DEPLOY_PATH/.env"
+compose_file="$DEPLOY_PATH/docker-compose.yml"
+
+[[ -f "$env_file" ]] || {
+  printf 'Missing deployment environment file: %s\n' "$env_file" >&2
+  exit 1
+}
+[[ -f "$compose_file" ]] || {
+  printf 'Missing Compose file: %s\n' "$compose_file" >&2
+  exit 1
+}
 
 docker_config="$(mktemp -d "$DEPLOY_PATH/.docker-config.XXXXXX")"
 cleanup() {
@@ -26,17 +34,15 @@ unset ghcr_token
 
 compose() {
   APP_IMAGE_REF="$APP_IMAGE_REF" \
-  APP_VERSION="$APP_VERSION" \
-  APP_ENV_FILE="$DEPLOY_PATH/.env" \
   DOCKER_CONFIG="$docker_config" \
     docker compose \
       --project-directory "$DEPLOY_PATH" \
-      --env-file "$DEPLOY_PATH/.env" \
-      -f "$DEPLOY_PATH/docker-compose.yml" \
+      --env-file "$env_file" \
+      -f "$compose_file" \
       "$@"
 }
 
+compose config --quiet
 compose pull "$COMPOSE_SERVICE"
-compose up -d --no-build --remove-orphans --wait --wait-timeout 120
-compose ps
-docker image prune --force --filter 'until=168h'
+compose up -d --no-build --wait --wait-timeout 120 "$COMPOSE_SERVICE"
+compose ps "$COMPOSE_SERVICE"

@@ -20,15 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v7
 
       - name: Prepare image name
-        shell: bash
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           printf 'IMAGE_NAME=%s\n' "$image" >> "$GITHUB_ENV"
 
@@ -57,65 +58,52 @@ jobs:
 
       - name: Configure SSH
         env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_PRIVATE_KEY }}
           SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
-        shell: bash
         run: |
           set -euo pipefail
           install -d -m 700 ~/.ssh
           umask 077
           printf '%s\n' "$SERVER_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           printf '%s\n' "$SERVER_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          {
+            printf 'Host deploy-target\n'
+            printf '  HostName %s\n' "$SERVER_HOST"
+            printf '  User %s\n' "$SERVER_USER"
+            printf '  IdentityFile ~/.ssh/deploy_key\n'
+            printf '  IdentitiesOnly yes\n'
+            printf '  StrictHostKeyChecking yes\n'
+            printf '  UserKnownHostsFile ~/.ssh/known_hosts\n'
+            printf '  BatchMode yes\n'
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config ~/.ssh/deploy_key ~/.ssh/known_hosts
 
       - name: Upload deployment files
         env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        shell: bash
         run: |
           set -euo pipefail
-          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9._/-]+$ && "$DEPLOY_PATH" != *..* ]]
-
-          ssh \
-            -i ~/.ssh/deploy_key \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile=~/.ssh/known_hosts \
-            "$SERVER_USER@$SERVER_HOST" \
+          ssh deploy-target \
             "mkdir -p $(printf '%q' "$DEPLOY_PATH")"
 
           scp -r \
-            -i ~/.ssh/deploy_key \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile=~/.ssh/known_hosts \
             docker-compose.yml scripts/deploy-ghcr.sh \
-            "$SERVER_USER@$SERVER_HOST:$DEPLOY_PATH/"
+            "deploy-target:$DEPLOY_PATH/"
 
       - name: Pull and restart
         env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USERNAME: ${{ github.actor }}
           APP_IMAGE_REF: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          APP_VERSION: ${{ github.ref_name }}
-        shell: bash
         run: |
           set -euo pipefail
 
-          printf '%s\n' "$GHCR_TOKEN" | ssh \
-            -i ~/.ssh/deploy_key \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile=~/.ssh/known_hosts \
-            "$SERVER_USER@$SERVER_HOST" \
+          printf '%s\n' "$GHCR_TOKEN" | ssh deploy-target \
             "DEPLOY_PATH=$(printf '%q' "$DEPLOY_PATH") \
              COMPOSE_SERVICE=$(printf '%q' "$COMPOSE_SERVICE") \
              APP_IMAGE_REF=$(printf '%q' "$APP_IMAGE_REF") \
-             APP_VERSION=$(printf '%q' "$APP_VERSION") \
              GHCR_USERNAME=$(printf '%q' "$GHCR_USERNAME") \
              bash $(printf '%q' "$DEPLOY_PATH/deploy-ghcr.sh")"
