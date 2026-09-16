@@ -26,22 +26,39 @@ ARG APP_VERSION=development
 ENV APP_VERSION=$APP_VERSION
 ```
 
-如果 Dockerfile、Compose 文件名或构建目录不是默认值，直接修改 `deploy.yml` 中对应路径。默认同时构建 `amd64` 和 `arm64` 镜像。
+如果 Dockerfile、Compose 文件名或构建目录不是默认值，直接修改 `deploy.yml` 中对应路径。默认只构建 `linux/amd64` 镜像。
 
 Compose 引用了其他本地文件时，把对应文件或顶级目录加入 `Upload deployment files` 的 `scp` 列表。
 
 ## 首次配置
 
-服务器需要 Docker、Docker Compose v2、Bash，并在部署目录中准备生产 `.env` 和持久化数据目录。
+服务器需要 Docker、Docker Compose v2、Bash 和支持密钥认证的 SSH 服务，并在部署目录中准备生产 `.env` 和持久化数据目录。
+
+为 GitHub Actions 创建一个无密码短语的专用 SSH 密钥。密钥只用于部署，不要提交到仓库：
+
+```shell
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f github-actions-deploy
+```
+
+把生成的 `github-actions-deploy.pub` 公钥内容加入部署用户在服务器上的 `~/.ssh/authorized_keys`。
+
+从可信环境获取服务器的 SSH 主机公钥，并通过其他可信渠道核对其指纹。例如：
+
+```shell
+ssh-keyscan -H your.server.example.com
+```
+
+将核对无误后的完整输出保存到 GitHub Secret。不要只依赖 `ssh-keyscan` 的结果判断服务器身份。
 
 在 GitHub 仓库的 `production` Environment 或 Actions Secrets 中配置：
 
 - `SERVER_HOST`
 - `SERVER_USER`
-- `SERVER_PASSWORD`
+- `SERVER_SSH_PRIVATE_KEY`，内容为 `github-actions-deploy` 私钥的完整文本
+- `SERVER_KNOWN_HOSTS`，内容为已核对的服务器 SSH 主机公钥记录，可包含多行
 - `DEPLOY_PATH`，例如 `/opt/my-app`
 
-不需要 GHCR Token。
+工作流使用该私钥进行 SSH 和 SCP 认证，并通过 `SERVER_KNOWN_HOSTS` 严格校验服务器身份，不需要 `SERVER_PASSWORD`。也不需要单独配置 GHCR Token，工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`。
 
 ## 发布
 
