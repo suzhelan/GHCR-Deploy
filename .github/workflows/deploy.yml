@@ -27,6 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Validate deployment settings
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SERVER_FINGERPRINT: ${{ secrets.SERVER_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          : "${SERVER_FINGERPRINT:?SERVER_FINGERPRINT is required for host verification}"
+          [[ "$DEPLOY_PATH" = /* && "$DEPLOY_PATH" != / ]]
+
       - name: Prepare image name
         run: |
           set -euo pipefail
@@ -56,54 +65,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Configure SSH
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
-          SERVER_SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_PRIVATE_KEY }}
-          SERVER_KNOWN_HOSTS: ${{ secrets.SERVER_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          install -d -m 700 ~/.ssh
-          umask 077
-          printf '%s\n' "$SERVER_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
-          printf '%s\n' "$SERVER_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
-          {
-            printf 'Host deploy-target\n'
-            printf '  HostName %s\n' "$SERVER_HOST"
-            printf '  User %s\n' "$SERVER_USER"
-            printf '  IdentityFile ~/.ssh/deploy_key\n'
-            printf '  IdentitiesOnly yes\n'
-            printf '  StrictHostKeyChecking yes\n'
-            printf '  UserKnownHostsFile ~/.ssh/known_hosts\n'
-            printf '  BatchMode yes\n'
-          } > ~/.ssh/config
-          chmod 600 ~/.ssh/config ~/.ssh/deploy_key ~/.ssh/known_hosts
-
-      - name: Upload deployment files
+      - name: Prepare deployment directory
+        uses: appleboy/ssh-action@v1.2.5
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          set -euo pipefail
-          ssh deploy-target \
-            "mkdir -p $(printf '%q' "$DEPLOY_PATH")"
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
+          envs: DEPLOY_PATH
+          script: |
+            set -euo pipefail
+            mkdir -p -- "$DEPLOY_PATH"
 
-          scp -r \
-            docker-compose.yml scripts/deploy-ghcr.sh \
-            "deploy-target:$DEPLOY_PATH/"
+      - name: Upload deployment files
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
+          source: docker-compose.yml,scripts/deploy-ghcr.sh
+          target: ${{ secrets.DEPLOY_PATH }}
+          overwrite: true
 
       - name: Pull and restart
+        uses: appleboy/ssh-action@v1.2.5
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USERNAME: ${{ github.actor }}
           APP_IMAGE_REF: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-        run: |
-          set -euo pipefail
-
-          printf '%s\n' "$GHCR_TOKEN" | ssh deploy-target \
-            "DEPLOY_PATH=$(printf '%q' "$DEPLOY_PATH") \
-             COMPOSE_SERVICE=$(printf '%q' "$COMPOSE_SERVICE") \
-             APP_IMAGE_REF=$(printf '%q' "$APP_IMAGE_REF") \
-             GHCR_USERNAME=$(printf '%q' "$GHCR_USERNAME") \
-             bash $(printf '%q' "$DEPLOY_PATH/deploy-ghcr.sh")"
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_PRIVATE_KEY }}
+          fingerprint: ${{ secrets.SERVER_FINGERPRINT }}
+          envs: DEPLOY_PATH,COMPOSE_SERVICE,APP_IMAGE_REF,GHCR_USERNAME,GHCR_TOKEN
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            printf '%s\n' "$GHCR_TOKEN" | \
+              bash "$DEPLOY_PATH/scripts/deploy-ghcr.sh"
